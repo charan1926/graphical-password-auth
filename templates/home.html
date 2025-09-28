@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+
+{% block title %}
+Home Page
+{% endblock %}
+
+
+{% block content %}
+</br></br><h1>Welcome {{ request.user.username }}</h1>
+<h1>Auth status: {{request.user.is_authenticated}}</h1>
+<br>
+<br>
+<p>
+    Depending on the Auth status, you will be seeing login/logout button at the top right.
+    <br>
+    <br>
+    Login: &nbsp&nbsp&nbspTo continue login
+    <br>
+    Logout: To sign out of the application
+</p>
+
+<div style=" padding: 390px; margain: 50px">
+@DR AMBEDKAR INSTITUTE OF TECHNOLOGY 
+
+</div>
+{% endblock %}
