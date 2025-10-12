@@ -1,21 +1,59 @@
-<!-- {% load static %} -->
+{% load static %}
 
-<div class="form-group">
-    <label for="password">Password:</label>
-    <br>
-    <br>
+<div class="form-group text-center">
+    <label for="password" class="font-weight-bold mb-3">
+        Select Your Graphical Password
+    </label>
+
     {% for row in p_images %}
-    <div class="row no-gutters">
+    <div class="d-flex justify-content-center mb-2">
         {% for col in row %}
-        <div class="col-2 no-gutters">
-            <!-- {{ forloop.parentloop.counter0  }}-{{ forloop.counter0  }} -->
-            <img src='{% static 'images/pwd/' %}{{ col }}.png' alt=" img" style="
-                height: 50px;
-                width: 50px;" id="{{ forloop.parentloop.counter0  }}{{ forloop.counter0  }}"
-                onclick="onSelect({{forloop.parentloop.counter0}}, {{forloop.counter0}})">
+        <div class="mx-1">
+            <img src="{% static 'images/pwd/' %}{{ col }}.png" 
+                 alt="password-img"
+                 class="pwd-img"
+                 id="{{ forloop.parentloop.counter0 }}{{ forloop.counter0 }}"
+                 onclick="onSelect({{forloop.parentloop.counter0}}, {{forloop.counter0}})">
         </div>
         {% endfor %}
     </div>
-    <div style="padding-bottom: 15px;"></div>
     {% endfor %}
 </div>
+
+<style>
+    .pwd-img {
+        height: 60px;
+        width: 60px;
+        border-radius: 8px;
+        border: 2px solid transparent;
+        cursor: pointer;
+        transition: all 0.3s ease-in-out;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    .pwd-img:hover {
+        transform: scale(1.1);
+        border-color: #1a73e8;
+        box-shadow: 0 4px 12px rgba(26, 115, 232, 0.3);
+    }
+
+    .pwd-img.active {
+        border-color: #1a73e8;
+        background: rgba(26, 115, 232, 0.1);
+    }
+</style>
+
+<script>
+    function onSelect(r, c) {
+        var res = r.toString() + c.toString();
+        var el = document.getElementById(res);
+
+        if (gpwd_set.has(res)) {
+            gpwd_set.delete(res);
+            el.classList.remove("active");
+        } else {
+            gpwd_set.add(res);
+            el.classList.add("active");
+        }
+    }
+</script>
