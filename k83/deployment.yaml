@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: graphical-auth
+  name: graphical-password-auth
   namespace: argocd
 spec:
   project: default
