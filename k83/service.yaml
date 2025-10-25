@@ -4,7 +4,7 @@ metadata:
   name: graphical-auth-service
 spec:
   selector:
-    app: graphical-auth
+    app: graphical-password-auth
   ports:
     - protocol: TCP
       port: 80
