@@ -7,7 +7,7 @@ spec:
   project: default
   source:
     repoURL: 'https://github.com/charan1926/graphical-password-auth.git'
-    path: 'apps/graphical-auth'
+    path: 'k83'
     targetRevision: HEAD
   destination:
     server: 'https://kubernetes.default.svc'
