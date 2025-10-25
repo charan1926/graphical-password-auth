@@ -2,9 +2,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: graphical-auth-service
+  namespace: default
 spec:
   selector:
-    app: graphical-password-auth
+    app: graphical-auth
   ports:
     - protocol: TCP
       port: 80
