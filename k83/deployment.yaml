@@ -1,20 +1,20 @@
-apiVersion: argoproj.io/v1alpha1
-kind: Application
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: graphical-password-auth
-  namespace: argocd
+  name: graphical-auth-deployment
+  namespace: default
 spec:
-  project: default
-  source:
-    repoURL: 'https://github.com/charan1926/graphical-password-auth.git'
-    path: 'k83'
-    targetRevision: HEAD
-  destination:
-    server: 'https://kubernetes.default.svc'
-    namespace: default
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
+  replicas: 1
+  selector:
+    matchLabels:
+      app: graphical-auth
+  template:
+    metadata:
+      labels:
+        app: graphical-auth
+    spec:
+      containers:
+      - name: graphical-auth
+        image: charan1926/graphical-auth:latest
+        ports:
+        - containerPort: 8000
