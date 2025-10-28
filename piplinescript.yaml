@@ -1,0 +1,110 @@
+pipeline {
+    agent any
+
+    environment {
+        SONARQUBE = "sonarqube"           
+        SONAR_TOKEN = credentials('sonarqube') 
+        IMAGE = "charan1926/graphical-auth"
+        DOCKERHUB_CREDENTIALS = 'Dockerhub' 
+        ARGOCD_SERVER = "localhost:8099"
+        APP_NAME = "graphical-password-auth"
+    }
+    stages {
+        stage('Clone Repository') {
+            steps {
+                git branch: 'main', url: 'https://github.com/charan1926/graphical-password-auth.git'
+            }
+        }
+
+        stage('Install Python Dependencies') {
+            steps {
+                sh 'pip install -r requirements.txt'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv("${SONARQUBE}") {
+                    script {
+                        def scannerHome = tool name: 'SonarScanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+                        sh """
+                        ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=graphical-auth \
+                            -Dsonar.sources=. \
+                            -Dsonar.host.url=http://localhost:9000 \
+                            -Dsonar.login=$SONAR_TOKEN \
+                            -Dsonar.exclusions=**/migrations/**,**/static/**,**/__pycache__/** \
+                            -Dsonar.python.version=3.9
+                        """
+                    }
+                }
+            }
+        }
+        stage('Build Docker Image') {
+            steps {
+                sh 'docker build -t ${IMAGE}:latest .'
+            }
+        }
+        stage('Run Docker Image') {
+            steps {
+                sh '''
+                    # Stop and remove any container using port 8000
+                    docker ps -q --filter "publish=8000" | xargs -r docker stop
+                    docker ps -a -q --filter "publish=8000" | xargs -r docker rm
+                    # Remove any container with same name (if exists)
+                    docker rm -f graphical-auth || true
+                    # Run the new container
+                    docker run -d -p 8000:8000 --name graphical-auth ${IMAGE}:latest
+                '''
+            }
+        }
+
+        stage('Trivy Scan') {
+            steps {
+                // Security vulnerability scan
+                sh 'trivy image ${IMAGE}:latest || true'
+            }
+        }
+        
+        stage('Login to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: "${DOCKERHUB_CREDENTIALS}", usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
+                    sh 'echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin'
+                }
+            }
+        }
+        stage('Login & Push to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: "${DOCKERHUB_CREDENTIALS}", usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
+                    sh '''
+                    echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
+                    docker push ${IMAGE}:latest
+                    '''
+                }
+            }
+        }
+       stage('Trigger ArgoCD Sync') {
+            steps {
+                script {
+                    echo "🚀 Triggering ArgoCD deployment..."
+                    withCredentials([usernamePassword(credentialsId: 'argocd', usernameVariable: 'ARGOCD_USER', passwordVariable: 'ARGOCD_PASS')]) {
+                        sh """
+                            argocd login $ARGOCD_SERVER --grpc-web --insecure --username $ARGOCD_USER --password $ARGOCD_PASS
+                            argocd app sync $APP_NAME
+                            argocd app wait $APP_NAME --health --timeout 180
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ CI Pipeline completed successfully!"
+        }
+        failure {
+            echo "❌ CI Pipeline failed. Please check logs."
+        }
+    }
+}
