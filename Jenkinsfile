@@ -1,45 +1,80 @@
-// Jenkinsfile (skeleton) - place at repo root on 'dev' branch
 pipeline {
-  agent { label 'k8s-agent' } // must match PodTemplate label in Jenkins
+  // 🔴 MAKE SURE this label matches the label in your Pod Template
+  agent { label 'k8s-agent' }   // or 'jnlp' if that's what you set in Jenkins
+
   environment {
-    REGISTRY = 'localhost:5000'            // replace with Nexus Docker repo endpoint
-    NEXUS_CRED = 'nexus-docker-creds'
+    REGISTRY       = 'localhost:8081'          
+    NEXUS_CRED     = 'nexus-docker-creds'
     KUBECONFIG_CRED = 'kubeconfig'
-    BUILD_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(8)}"
-    BACKEND_IMAGE = "${REGISTRY}/graphpass-backend:${BUILD_TAG}"
-    SIM_IMAGE = "${REGISTRY}/graphpass-sim:${BUILD_TAG}"
   }
-  options { timestamps(); skipStagesAfterUnstable() }
+
+  // ✅ Removed timestamps(), keep only valid options
+  options { 
+    skipStagesAfterUnstable()
+  }
+
   stages {
+    stage('Init') {
+      steps {
+        script {
+          // Safe way to build tag using env vars
+          def shortCommit = (env.GIT_COMMIT ?: 'no-git-hash').take(8)
+          env.BUILD_TAG     = "${env.BUILD_NUMBER}-${shortCommit}"
+          env.BACKEND_IMAGE = "${env.REGISTRY}/graphpass-backend:${env.BUILD_TAG}"
+          env.SIM_IMAGE     = "${env.REGISTRY}/graphpass-sim:${env.BUILD_TAG}"
+          echo "BUILD_TAG: ${env.BUILD_TAG}"
+          echo "BACKEND_IMAGE: ${env.BACKEND_IMAGE}"
+          echo "SIM_IMAGE: ${env.SIM_IMAGE}"
+        }
+      }
+    }
+
     stage('Checkout') {
-      steps { checkout scm }
+      steps {
+        // if you want timestamps, you can wrap steps like this:
+        // timestamps {
+        //   checkout scm
+        // }
+        checkout scm
+      }
     }
 
     stage('Lint & SAST') {
       parallel {
         stage('Backend Lint') {
-          steps { sh 'echo "Run backend lint here (flake8/bandit etc.)"' }
+          steps {
+            sh 'echo "Run backend lint here (flake8/bandit etc.)"'
+          }
         }
         stage('Frontend Lint') {
-          steps { sh 'echo "Run frontend lint if applicable"' }
+          steps {
+            sh 'echo "Run frontend lint if applicable"'
+          }
         }
       }
     }
 
     stage('Unit Tests') {
       parallel {
-        stage('Backend Tests') { steps { sh 'pytest -q || true' } }
-        stage('Sim Tests')     { steps { sh 'echo "sim unit tests here"' } }
+        stage('Backend Tests') {
+          steps {
+            sh 'pytest -q || true'
+          }
+        }
+        stage('Sim Tests') {
+          steps {
+            sh 'echo "sim unit tests here"'
+          }
+        }
       }
     }
 
     stage('Build Images') {
       steps {
         script {
-          // build backend image
           sh """
-            docker build -t ${BACKEND_IMAGE} ./api || true
-            docker build -t ${SIM_IMAGE} ./simulator || true
+            docker build -t ${env.BACKEND_IMAGE} ./api || true
+            docker build -t ${env.SIM_IMAGE} ./simulator || true
           """
         }
       }
@@ -48,19 +83,19 @@ pipeline {
     stage('Scan Images') {
       steps {
         sh """
-          trivy image --exit-code 1 --severity CRITICAL ${BACKEND_IMAGE} || true
-          trivy image --exit-code 1 --severity CRITICAL ${SIM_IMAGE} || true
+          trivy image --exit-code 1 --severity CRITICAL ${env.BACKEND_IMAGE} || true
+          trivy image --exit-code 1 --severity CRITICAL ${env.SIM_IMAGE} || true
         """
       }
     }
 
     stage('Publish Images') {
       steps {
-        withCredentials([usernamePassword(credentialsId: "${NEXUS_CRED}", usernameVariable: 'NEXU_USER', passwordVariable: 'NEXU_PASS')]) {
+        withCredentials([usernamePassword(credentialsId: "${env.NEXUS_CRED}", usernameVariable: 'NEXU_USER', passwordVariable: 'NEXU_PASS')]) {
           sh """
-            echo "$NEXU_PASS" | docker login -u "$NEXU_USER" --password-stdin ${REGISTRY} || true
-            docker push ${BACKEND_IMAGE} || true
-            docker push ${SIM_IMAGE} || true
+            echo "$NEXU_PASS" | docker login -u "$NEXU_USER" --password-stdin ${env.REGISTRY} || true
+            docker push ${env.BACKEND_IMAGE} || true
+            docker push ${env.SIM_IMAGE} || true
           """
         }
       }
@@ -68,10 +103,10 @@ pipeline {
 
     stage('Deploy to Dev') {
       steps {
-        withCredentials([file(credentialsId: "${KUBECONFIG_CRED}", variable: 'KUBECONFIG')]) {
+        withCredentials([file(credentialsId: "${env.KUBECONFIG_CRED}", variable: 'KUBECONFIG')]) {
           sh """
-            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-backend graphpass-backend=${BACKEND_IMAGE} --record || true
-            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-sim graphpass-sim=${SIM_IMAGE} --record || true
+            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-backend graphpass-backend=${env.BACKEND_IMAGE} --record || true
+            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-sim graphpass-sim=${env.SIM_IMAGE} --record || true
             kubectl --kubeconfig=$KUBECONFIG -n dev rollout status deployment/graphpass-backend
           """
         }
@@ -87,7 +122,7 @@ pipeline {
 
   post {
     always {
-      junit 'api/tests/**/results.xml' // adjust paths
+      junit 'api/tests/**/results.xml' // adjust paths if needed
       archiveArtifacts artifacts: '**/target/*.jar, **/*.sbom.json', fingerprint: true
     }
     failure {
