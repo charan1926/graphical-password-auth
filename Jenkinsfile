@@ -1,31 +1,27 @@
+// Jenkinsfile
 pipeline {
   // This MUST match the label in your Kubernetes Pod Template
   agent { label 'k8s-agent' }
 
   environment {
-    REGISTRY        = 'localhost:8081'        // TODO: replace with your Nexus repo like: nexus-host:5000
-    NEXUS_CRED      = 'nexus-docker-creds'
+    REGISTRY       = 'localhost:5000'        // TODO: replace with your Nexus Docker registry
+    NEXUS_CRED     = 'nexus-docker-creds'
     KUBECONFIG_CRED = 'kubeconfig'
-
-    // Simple image tags based on build number
-    BACKEND_IMAGE = "${REGISTRY}/graphpass-backend:${BUILD_NUMBER}"
-    SIM_IMAGE     = "${REGISTRY}/graphpass-sim:${BUILD_NUMBER}"
+    // Simple BUILD_TAG so we don't need Groovy methods here
+    BUILD_TAG      = "${env.BUILD_NUMBER}"
+    BACKEND_IMAGE  = "${REGISTRY}/graphpass-backend:${BUILD_TAG}"
+    SIM_IMAGE      = "${REGISTRY}/graphpass-sim:${BUILD_TAG}"
   }
 
   options {
-    // This one is supported; we removed 'timestamps()' from options
+    // 'timestamps()' is NOT a valid declarative option in your version
     skipStagesAfterUnstable()
   }
 
   stages {
-
     stage('Checkout') {
       steps {
         checkout scm
-        script {
-          // Optional: log commit for visibility
-          sh 'git rev-parse --short HEAD || true'
-        }
       }
     }
 
@@ -48,12 +44,13 @@ pipeline {
       parallel {
         stage('Backend Tests') {
           steps {
-            sh 'pytest -q || true'   // replace with real test command
+            // change "|| true" to fail the build once tests are ready
+            sh 'pytest -q || true'
           }
         }
         stage('Sim Tests') {
           steps {
-            sh 'echo "sim unit tests here" || true'
+            sh 'echo "sim unit tests here"'
           }
         }
       }
@@ -63,10 +60,7 @@ pipeline {
       steps {
         script {
           sh """
-            echo "Building backend image: ${BACKEND_IMAGE}"
             docker build -t ${BACKEND_IMAGE} ./api || true
-
-            echo "Building sim image: ${SIM_IMAGE}"
             docker build -t ${SIM_IMAGE} ./simulator || true
           """
         }
@@ -76,10 +70,7 @@ pipeline {
     stage('Scan Images') {
       steps {
         sh """
-          echo "Scanning backend image with Trivy"
           trivy image --exit-code 1 --severity CRITICAL ${BACKEND_IMAGE} || true
-
-          echo "Scanning sim image with Trivy"
           trivy image --exit-code 1 --severity CRITICAL ${SIM_IMAGE} || true
         """
       }
@@ -95,13 +86,8 @@ pipeline {
           )
         ]) {
           sh """
-            echo "Logging into registry: ${REGISTRY}"
             echo "$NEXU_PASS" | docker login -u "$NEXU_USER" --password-stdin ${REGISTRY} || true
-
-            echo "Pushing backend image: ${BACKEND_IMAGE}"
             docker push ${BACKEND_IMAGE} || true
-
-            echo "Pushing sim image: ${SIM_IMAGE}"
             docker push ${SIM_IMAGE} || true
           """
         }
@@ -114,16 +100,9 @@ pipeline {
           file(credentialsId: "${KUBECONFIG_CRED}", variable: 'KUBECONFIG')
         ]) {
           sh """
-            echo "Deploying backend to dev with image: ${BACKEND_IMAGE}"
-            kubectl --kubeconfig=$KUBECONFIG -n dev set image \
-              deployment/graphpass-backend graphpass-backend=${BACKEND_IMAGE} --record || true
-
-            echo "Deploying sim to dev with image: ${SIM_IMAGE}"
-            kubectl --kubeconfig=$KUBECONFIG -n dev set image \
-              deployment/graphpass-sim graphpass-sim=${SIM_IMAGE} --record || true
-
-            echo "Waiting for backend rollout..."
-            kubectl --kubeconfig=$KUBECONFIG -n dev rollout status deployment/graphpass-backend || true
+            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-backend graphpass-backend=${BACKEND_IMAGE} --record || true
+            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-sim graphpass-sim=${SIM_IMAGE} --record || true
+            kubectl --kubeconfig=$KUBECONFIG -n dev rollout status deployment/graphpass-backend
           """
         }
       }
@@ -131,23 +110,20 @@ pipeline {
 
     stage('Integration Tests') {
       steps {
-        sh 'echo "Run integration tests hitting dev cluster endpoints" || true'
+        sh 'echo "run integration tests hitting dev cluster endpoints" || true'
       }
     }
   }
 
   post {
     always {
-      // Adjust test report path to your project
-      junit allowEmptyResults: true, testResults: 'api/tests/**/results.xml'
-
+      junit 'api/tests/**/results.xml' // adjust paths if needed
       archiveArtifacts artifacts: '**/target/*.jar, **/*.sbom.json', fingerprint: true
     }
-
     failure {
-      mail to: 'charannaidus1926@gmail.com',
+      mail to: 'you@example.com',
            subject: "Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-           body: "See Jenkins for details: ${env.BUILD_URL}"
+           body: "See Jenkins."
     }
   }
 }
