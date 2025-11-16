@@ -1,21 +1,41 @@
 pipeline {
-  agent { label 'jnlp' }  // MUST match Pod Template label in Kubernetes cloud
-
-  environment {
-    REGISTRY        = 'localhost:5000'            // replace with Nexus Docker repo endpoint
-    NEXUS_CRED      = 'nexus-docker-creds'
-    KUBECONFIG_CRED = 'kubeconfig'
-    BUILD_TAG       = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(8)}"
-    BACKEND_IMAGE   = "${REGISTRY}/graphpass-backend:${BUILD_TAG}"
-    SIM_IMAGE       = "${REGISTRY}/graphpass-sim:${BUILD_TAG}"
+  agent {
+    kubernetes {
+      // Optional but nice to be explicit:
+      cloud 'jenkins-k8s'           // must match your Cloud name in Jenkins
+      label 'jnlp'                  // must match Pod Template label
+      inheritFrom 'jenkins-agent'   // Pod Template name in Jenkins config
+      // defaultContainer 'jnlp'    // set if your pod template defines this container name
+    }
   }
 
-  // timestamps() removed because your Jenkins doesn’t support that Pipeline option
-  options { 
+  environment {
+    REGISTRY        = 'localhost:8081'         // TODO: replace with your Nexus Docker repo endpoint
+    NEXUS_CRED      = 'nexus-docker-creds'
+    KUBECONFIG_CRED = 'kubeconfig'
+  }
+
+  options {
+    // timestamps() is NOT allowed in 'options' – we removed it
     skipStagesAfterUnstable()
   }
 
   stages {
+
+    stage('Init') {
+      steps {
+        script {
+          // Build dynamic tags safely at runtime
+          def shortCommit = env.GIT_COMMIT ? env.GIT_COMMIT.take(8) : "local"
+          env.BUILD_TAG     = "${env.BUILD_NUMBER}-${shortCommit}"
+          env.BACKEND_IMAGE = "${env.REGISTRY}/graphpass-backend:${env.BUILD_TAG}"
+          env.SIM_IMAGE     = "${env.REGISTRY}/graphpass-sim:${env.BUILD_TAG}"
+          echo "Using BUILD_TAG=${env.BUILD_TAG}"
+          echo "Backend image: ${env.BACKEND_IMAGE}"
+          echo "Sim image: ${env.SIM_IMAGE}"
+        }
+      }
+    }
 
     stage('Checkout') {
       steps {
@@ -42,13 +62,13 @@ pipeline {
       parallel {
         stage('Backend Tests') {
           steps {
-            // adjust to your test command
+            // Replace with real tests; `|| true` prevents pipeline from failing while you wire things up
             sh 'pytest -q || true'
           }
         }
         stage('Sim Tests') {
           steps {
-            sh 'echo "sim unit tests here"'
+            sh 'echo "simulator unit tests here" || true'
           }
         }
       }
@@ -57,11 +77,12 @@ pipeline {
     stage('Build Images') {
       steps {
         script {
+          // Ensure your agent image / pod template has Docker (or adjust to Kaniko/BuildKit)
           sh """
             echo "Building backend image: ${BACKEND_IMAGE}"
             docker build -t ${BACKEND_IMAGE} ./api || true
 
-            echo "Building sim image: ${SIM_IMAGE}"
+            echo "Building simulator image: ${SIM_IMAGE}"
             docker build -t ${SIM_IMAGE} ./simulator || true
           """
         }
@@ -70,11 +91,12 @@ pipeline {
 
     stage('Scan Images') {
       steps {
+        // Ensure Trivy is installed in the agent image (or remove for now)
         sh """
           echo "Scanning backend image with Trivy"
           trivy image --exit-code 1 --severity CRITICAL ${BACKEND_IMAGE} || true
 
-          echo "Scanning sim image with Trivy"
+          echo "Scanning simulator image with Trivy"
           trivy image --exit-code 1 --severity CRITICAL ${SIM_IMAGE} || true
         """
       }
@@ -85,18 +107,18 @@ pipeline {
         withCredentials([
           usernamePassword(
             credentialsId: "${NEXUS_CRED}",
-            usernameVariable: 'NEXU_USER',
-            passwordVariable: 'NEXU_PASS'
+            usernameVariable: 'NEXUS_USER',
+            passwordVariable: 'NEXUS_PASS'
           )
         ]) {
           sh """
-            echo "Logging in to Docker registry: ${REGISTRY}"
-            echo "$NEXU_PASS" | docker login -u "$NEXU_USER" --password-stdin ${REGISTRY} || true
+            echo "Logging into Docker registry: ${REGISTRY}"
+            echo "${NEXUS_PASS}" | docker login -u "${NEXUS_USER}" --password-stdin ${REGISTRY} || true
 
-            echo "Pushing backend image"
+            echo "Pushing backend image: ${BACKEND_IMAGE}"
             docker push ${BACKEND_IMAGE} || true
 
-            echo "Pushing sim image"
+            echo "Pushing simulator image: ${SIM_IMAGE}"
             docker push ${SIM_IMAGE} || true
           """
         }
@@ -109,14 +131,13 @@ pipeline {
           file(credentialsId: "${KUBECONFIG_CRED}", variable: 'KUBECONFIG')
         ]) {
           sh """
-            echo "Deploying backend to dev namespace"
-            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-backend graphpass-backend=${BACKEND_IMAGE} --record || true
+            echo "Deploying to Kubernetes namespace: dev"
 
-            echo "Deploying sim to dev namespace"
-            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-sim graphpass-sim=${SIM_IMAGE} --record || true
+            kubectl --kubeconfig=${KUBECONFIG} -n dev set image deployment/graphpass-backend graphpass-backend=${BACKEND_IMAGE} --record || true
+            kubectl --kubeconfig=${KUBECONFIG} -n dev set image deployment/graphpass-sim     graphpass-sim=${SIM_IMAGE} --record || true
 
-            echo "Waiting for backend deployment rollout"
-            kubectl --kubeconfig=$KUBECONFIG -n dev rollout status deployment/graphpass-backend || true
+            kubectl --kubeconfig=${KUBECONFIG} -n dev rollout status deployment/graphpass-backend || true
+            kubectl --kubeconfig=${KUBECONFIG} -n dev rollout status deployment/graphpass-sim || true
           """
         }
       }
@@ -131,15 +152,29 @@ pipeline {
 
   post {
     always {
-      // adjust pattern to your real test report location
-      junit 'api/tests/**/results.xml'
-      archiveArtifacts artifacts: '**/target/*.jar, **/*.sbom.json', fingerprint: true
+      // Wrap in try-catch so missing files don't break the whole build
+      script {
+        try {
+          junit 'api/tests/**/results.xml'
+        } catch (e) {
+          echo "No JUnit results found or failed to publish: ${e}"
+        }
+
+        try {
+          archiveArtifacts artifacts: '**/target/*.jar, **/*.sbom.json', fingerprint: true
+        } catch (e) {
+          echo "No artifacts to archive or failed to archive: ${e}"
+        }
+      }
     }
     failure {
-      // requires Mailer or Email-ext plugin configured
-      mail to: 'you@example.com',
-           subject: "Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-           body: "See Jenkins for details."
+      script {
+        echo "Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+        // Configure SMTP before enabling this
+        // mail to: 'you@example.com',
+        //      subject: "Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+        //      body: "See Jenkins."
+      }
     }
   }
 }
