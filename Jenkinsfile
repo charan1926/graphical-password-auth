@@ -1,32 +1,19 @@
 pipeline {
-  agent {
-    kubernetes {
-      // This MUST match the Cloud name in "Manage Jenkins → Configure System → Cloud"
-      cloud 'jenkins-k8s'
-
-      // This MUST match the "Labels" field in your Pod Template
-      label 'jnlp'
-
-      // Container name that runs the agent (in Pod template UI, the container should also be called 'jnlp')
-      defaultContainer 'jnlp'
-
-      // If your pod template is named "jenkins-agent", we can inherit it (optional but nice)
-      // comment this line if your Jenkins version/plugin complains
-      inheritFrom 'jenkins-agent'
-    }
-  }
+  // This MUST match the label in your Kubernetes Pod Template
+  agent { label 'k8s-agent' }
 
   environment {
-    REGISTRY        = 'localhost:5000'          // TODO: replace with your Nexus Docker repo endpoint
+    REGISTRY        = 'localhost:8081'        // TODO: replace with your Nexus repo like: nexus-host:5000
     NEXUS_CRED      = 'nexus-docker-creds'
     KUBECONFIG_CRED = 'kubeconfig'
-    BUILD_TAG       = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(8)}"
-    BACKEND_IMAGE   = "${REGISTRY}/graphpass-backend:${BUILD_TAG}"
-    SIM_IMAGE       = "${REGISTRY}/graphpass-sim:${BUILD_TAG}"
+
+    // Simple image tags based on build number
+    BACKEND_IMAGE = "${REGISTRY}/graphpass-backend:${BUILD_NUMBER}"
+    SIM_IMAGE     = "${REGISTRY}/graphpass-sim:${BUILD_NUMBER}"
   }
 
-  // 'timestamps()' was causing an option error on your Jenkins, so we only keep skipStagesAfterUnstable
   options {
+    // This one is supported; we removed 'timestamps()' from options
     skipStagesAfterUnstable()
   }
 
@@ -34,8 +21,11 @@ pipeline {
 
     stage('Checkout') {
       steps {
-        // In a multibranch job, this uses the Jenkinsfile's repo/branch
         checkout scm
+        script {
+          // Optional: log commit for visibility
+          sh 'git rev-parse --short HEAD || true'
+        }
       }
     }
 
@@ -43,22 +33,12 @@ pipeline {
       parallel {
         stage('Backend Lint') {
           steps {
-            sh '''
-              echo "Run backend lint here (flake8/bandit etc.)"
-              # Example:
-              # pip install -r api/requirements-dev.txt
-              # flake8 api || true
-            '''
+            sh 'echo "Run backend lint here (flake8/bandit etc.)"'
           }
         }
-
         stage('Frontend Lint') {
           steps {
-            sh '''
-              echo "Run frontend lint if applicable"
-              # Example:
-              # cd frontend && npm install && npm run lint || true
-            '''
+            sh 'echo "Run frontend lint if applicable"'
           }
         }
       }
@@ -68,23 +48,12 @@ pipeline {
       parallel {
         stage('Backend Tests') {
           steps {
-            sh '''
-              echo "Running backend unit tests"
-              # Example:
-              # cd api
-              # pytest -q || true
-            '''
+            sh 'pytest -q || true'   // replace with real test command
           }
         }
-
         stage('Sim Tests') {
           steps {
-            sh '''
-              echo "Sim unit tests here"
-              # Example:
-              # cd simulator
-              # pytest -q || true
-            '''
+            sh 'echo "sim unit tests here" || true'
           }
         }
       }
@@ -121,18 +90,18 @@ pipeline {
         withCredentials([
           usernamePassword(
             credentialsId: "${NEXUS_CRED}",
-            usernameVariable: 'NEXUS_USER',
-            passwordVariable: 'NEXUS_PASS'
+            usernameVariable: 'NEXU_USER',
+            passwordVariable: 'NEXU_PASS'
           )
         ]) {
           sh """
-            echo "Logging in to registry: ${REGISTRY}"
-            echo "$NEXUS_PASS" | docker login -u "$NEXUS_USER" --password-stdin ${REGISTRY} || true
+            echo "Logging into registry: ${REGISTRY}"
+            echo "$NEXU_PASS" | docker login -u "$NEXU_USER" --password-stdin ${REGISTRY} || true
 
-            echo "Pushing backend image"
+            echo "Pushing backend image: ${BACKEND_IMAGE}"
             docker push ${BACKEND_IMAGE} || true
 
-            echo "Pushing sim image"
+            echo "Pushing sim image: ${SIM_IMAGE}"
             docker push ${SIM_IMAGE} || true
           """
         }
@@ -145,11 +114,15 @@ pipeline {
           file(credentialsId: "${KUBECONFIG_CRED}", variable: 'KUBECONFIG')
         ]) {
           sh """
-            echo "Deploying to dev namespace using kubeconfig"
-            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-backend graphpass-backend=${BACKEND_IMAGE} --record || true
-            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-sim graphpass-sim=${SIM_IMAGE} --record || true
+            echo "Deploying backend to dev with image: ${BACKEND_IMAGE}"
+            kubectl --kubeconfig=$KUBECONFIG -n dev set image \
+              deployment/graphpass-backend graphpass-backend=${BACKEND_IMAGE} --record || true
 
-            echo "Waiting for backend deployment rollout"
+            echo "Deploying sim to dev with image: ${SIM_IMAGE}"
+            kubectl --kubeconfig=$KUBECONFIG -n dev set image \
+              deployment/graphpass-sim graphpass-sim=${SIM_IMAGE} --record || true
+
+            echo "Waiting for backend rollout..."
             kubectl --kubeconfig=$KUBECONFIG -n dev rollout status deployment/graphpass-backend || true
           """
         }
@@ -158,23 +131,21 @@ pipeline {
 
     stage('Integration Tests') {
       steps {
-        sh '''
-          echo "Run integration tests hitting dev cluster endpoints here"
-          # e.g., curl or pytest hitting k8s services
-        '''
+        sh 'echo "Run integration tests hitting dev cluster endpoints" || true'
       }
     }
   }
 
   post {
     always {
-      // Adjust paths to your actual reports; currently just examples
+      // Adjust test report path to your project
       junit allowEmptyResults: true, testResults: 'api/tests/**/results.xml'
+
       archiveArtifacts artifacts: '**/target/*.jar, **/*.sbom.json', fingerprint: true
     }
 
     failure {
-      mail to: 'you@example.com',
+      mail to: 'charannaidus1926@gmail.com',
            subject: "Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
            body: "See Jenkins for details: ${env.BUILD_URL}"
     }
