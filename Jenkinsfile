@@ -1,30 +1,40 @@
 pipeline {
-  // MUST match Pod Template label
+  // Use your k8s agent
   agent { label 'k8s-agent' }
 
   environment {
-    REGISTRY      = 'localhost:5000'        // or your Nexus docker endpoint
-    NEXUS_CRED    = 'nexus-docker-creds'
+    REGISTRY        = 'localhost:5000'          // your Docker/Nexus registry
+    NEXUS_CRED      = 'nexus-docker-creds'
     KUBECONFIG_CRED = 'kubeconfig'
-    BACKEND_IMAGE = "${env.REGISTRY}/graphpass-backend:${env.BUILD_NUMBER}"
-    SIM_IMAGE     = "${env.REGISTRY}/graphpass-sim:${env.BUILD_NUMBER}"
+
+    // use variables directly (not env.REGISTRY)
+    BACKEND_IMAGE   = "${REGISTRY}/graphpass-backend:${BUILD_NUMBER}"
+    SIM_IMAGE       = "${REGISTRY}/graphpass-sim:${BUILD_NUMBER}"
   }
 
-  // remove timestamps() since your Jenkins complained it's not a valid option
-  options { skipStagesAfterUnstable() }
+  options {
+    skipStagesAfterUnstable()
+  }
 
   stages {
+
     stage('Checkout') {
-      steps { checkout scm }
+      steps {
+        checkout scm
+      }
     }
 
     stage('Lint & SAST') {
       parallel {
         stage('Backend Lint') {
-          steps { sh 'echo "Run backend lint here (flake8/bandit etc.)"' }
+          steps {
+            sh 'echo "Run backend lint here (flake8/bandit etc.)"'
+          }
         }
         stage('Frontend Lint') {
-          steps { sh 'echo "Run frontend lint if applicable"' }
+          steps {
+            sh 'echo "Run frontend lint if applicable"'
+          }
         }
       }
     }
@@ -32,10 +42,22 @@ pipeline {
     stage('Unit Tests') {
       parallel {
         stage('Backend Tests') {
-          steps { sh 'pytest -q || true' }
+          steps {
+            // Keeps your behavior but adds JUnit XML output path
+            sh """
+              if command -v pytest >/dev/null 2>&1; then
+                cd api
+                pytest -q --junitxml=tests/results.xml || true
+              else
+                echo "pytest not installed on this agent, skipping backend tests"
+              fi
+            """
+          }
         }
         stage('Sim Tests') {
-          steps { sh 'echo "sim unit tests here" || true' }
+          steps {
+            sh 'echo "sim unit tests here" || true'
+          }
         }
       }
     }
@@ -43,8 +65,12 @@ pipeline {
     stage('Build Images') {
       steps {
         sh """
-          docker build -t ${BACKEND_IMAGE} ./api || true
-          docker build -t ${SIM_IMAGE} ./simulator || true
+          if command -v docker >/dev/null 2>&1; then
+            docker build -t ${BACKEND_IMAGE} ./api || true
+            docker build -t ${SIM_IMAGE} ./simulator || true
+          else
+            echo "docker not found on agent, skipping Docker builds"
+          fi
         """
       }
     }
@@ -52,8 +78,12 @@ pipeline {
     stage('Scan Images') {
       steps {
         sh """
-          trivy image --exit-code 1 --severity CRITICAL ${BACKEND_IMAGE} || true
-          trivy image --exit-code 1 --severity CRITICAL ${SIM_IMAGE} || true
+          if command -v trivy >/dev/null 2>&1; then
+            trivy image --exit-code 1 --severity CRITICAL ${BACKEND_IMAGE} || true
+            trivy image --exit-code 1 --severity CRITICAL ${SIM_IMAGE} || true
+          else
+            echo "trivy not found on agent, skipping image scanning"
+          fi
         """
       }
     }
@@ -62,9 +92,13 @@ pipeline {
       steps {
         withCredentials([usernamePassword(credentialsId: "${NEXUS_CRED}", usernameVariable: 'NEXU_USER', passwordVariable: 'NEXU_PASS')]) {
           sh """
-            echo "$NEXU_PASS" | docker login -u "$NEXU_USER" --password-stdin ${REGISTRY} || true
-            docker push ${BACKEND_IMAGE} || true
-            docker push ${SIM_IMAGE} || true
+            if command -v docker >/dev/null 2>&1; then
+              echo "$NEXU_PASS" | docker login -u "$NEXU_USER" --password-stdin ${REGISTRY} || true
+              docker push ${BACKEND_IMAGE} || true
+              docker push ${SIM_IMAGE} || true
+            else
+              echo "docker not found on agent, skipping image push"
+            fi
           """
         }
       }
@@ -72,11 +106,15 @@ pipeline {
 
     stage('Deploy to Dev') {
       steps {
-        withCredentials([file(credentialsId: "${KUBECONFIG_CRED}", variable: 'KUBECONFIG')]) {
+        withCredentials([file(credentialsId: "${KUBECONFIG_CRED}", variable: 'KUBECONFIG_FILE')]) {
           sh """
-            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-backend graphpass-backend=${BACKEND_IMAGE} --record || true
-            kubectl --kubeconfig=$KUBECONFIG -n dev set image deployment/graphpass-sim graphpass-sim=${SIM_IMAGE} --record || true
-            kubectl --kubeconfig=$KUBECONFIG -n dev rollout status deployment/graphpass-backend || true
+            if command -v kubectl >/dev/null 2>&1; then
+              kubectl --kubeconfig=$KUBECONFIG_FILE -n dev set image deployment/graphpass-backend graphpass-backend=${BACKEND_IMAGE} --record || true
+              kubectl --kubeconfig=$KUBECONFIG_FILE -n dev set image deployment/graphpass-sim graphpass-sim=${SIM_IMAGE} --record || true
+              kubectl --kubeconfig=$KUBECONFIG_FILE -n dev rollout status deployment/graphpass-backend || true
+            else
+              echo "kubectl not found on agent, skipping deploy"
+            fi
           """
         }
       }
@@ -91,13 +129,24 @@ pipeline {
 
   post {
     always {
-      junit 'api/tests/**/results.xml'
-      archiveArtifacts artifacts: '**/target/*.jar, **/*.sbom.json', fingerprint: true
+      // Don't fail if no test XML yet
+      junit testResults: 'api/tests/**/results.xml', allowEmptyResults: true
+
+      // Don't fail if no JAR/SBOM yet
+      archiveArtifacts artifacts: '**/target/*.jar, **/*.sbom.json',
+                       fingerprint: true,
+                       allowEmptyArchive: true
     }
     failure {
+      // Your mail step was failing because there is no SMTP on localhost:25
+      // Keep this echo for now; uncomment mail after configuring SMTP.
+      echo "Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}. Configure SMTP and enable mail step if needed."
+
+      /*
       mail to: 'you@example.com',
            subject: "Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
            body: "See Jenkins."
+      */
     }
   }
 }
