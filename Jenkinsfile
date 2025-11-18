@@ -1,6 +1,6 @@
 pipeline {
   // You’re currently running on the master/controller node ("Jenkins")
-  agent any
+ agent { label 'k8s-agent' }
 
   environment {
     REGISTRY        = 'localhost:5000'
