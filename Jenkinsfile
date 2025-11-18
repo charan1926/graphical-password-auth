@@ -1,13 +1,12 @@
 pipeline {
-  // Use your k8s agent
+  // Change to 'any' if you haven't created a k8s agent yet
   agent { label 'k8s-agent' }
 
   environment {
-    REGISTRY        = 'localhost:5000'          // your Docker/Nexus registry
+    REGISTRY        = 'localhost:5000'          // your Docker registry (or Nexus)
     NEXUS_CRED      = 'nexus-docker-creds'
     KUBECONFIG_CRED = 'kubeconfig'
 
-    // use variables directly (not env.REGISTRY)
     BACKEND_IMAGE   = "${REGISTRY}/graphpass-backend:${BUILD_NUMBER}"
     SIM_IMAGE       = "${REGISTRY}/graphpass-sim:${BUILD_NUMBER}"
   }
@@ -28,12 +27,21 @@ pipeline {
       parallel {
         stage('Backend Lint') {
           steps {
-            sh 'echo "Run backend lint here (flake8/bandit etc.)"'
+            sh '''
+              cd api
+              echo ">> Running backend lint (flake8/bandit)..."
+              # pip install -r requirements.txt
+              # flake8 .
+              # bandit -r .
+            '''
           }
         }
         stage('Frontend Lint') {
           steps {
-            sh 'echo "Run frontend lint if applicable"'
+            sh '''
+              echo ">> Running frontend lint..."
+              # put npm/yarn lint commands here if you have a frontend
+            '''
           }
         }
       }
@@ -43,20 +51,22 @@ pipeline {
       parallel {
         stage('Backend Tests') {
           steps {
-            // Keeps your behavior but adds JUnit XML output path
-            sh """
-              if command -v pytest >/dev/null 2>&1; then
-                cd api
-                pytest -q --junitxml=tests/results.xml || true
-              else
-                echo "pytest not installed on this agent, skipping backend tests"
-              fi
-            """
+            sh '''
+              cd api
+              echo ">> Running backend unit tests..."
+              # pip install -r requirements.txt
+              pytest -q --junitxml=test-results/pytest-results.xml
+            '''
           }
         }
         stage('Sim Tests') {
           steps {
-            sh 'echo "sim unit tests here" || true'
+            sh '''
+              echo ">> Running simulator tests..."
+              # cd simulator
+              # pytest -q --junitxml=test-results/pytest-results.xml
+              echo "sim unit tests here"
+            '''
           }
         }
       }
@@ -65,12 +75,11 @@ pipeline {
     stage('Build Images') {
       steps {
         sh """
-          if command -v docker >/dev/null 2>&1; then
-            docker build -t ${BACKEND_IMAGE} ./api || true
-            docker build -t ${SIM_IMAGE} ./simulator || true
-          else
-            echo "docker not found on agent, skipping Docker builds"
-          fi
+          echo ">> Building backend image: ${BACKEND_IMAGE}"
+          docker build -t ${BACKEND_IMAGE} ./api
+
+          echo ">> Building simulator image: ${SIM_IMAGE}"
+          docker build -t ${SIM_IMAGE} ./simulator
         """
       }
     }
@@ -78,27 +87,31 @@ pipeline {
     stage('Scan Images') {
       steps {
         sh """
-          if command -v trivy >/dev/null 2>&1; then
-            trivy image --exit-code 1 --severity CRITICAL ${BACKEND_IMAGE} || true
-            trivy image --exit-code 1 --severity CRITICAL ${SIM_IMAGE} || true
-          else
-            echo "trivy not found on agent, skipping image scanning"
-          fi
+          echo ">> Scanning backend image with Trivy"
+          trivy image --exit-code 1 --severity CRITICAL ${BACKEND_IMAGE}
+
+          echo '>> Scanning simulator image with Trivy'
+          trivy image --exit-code 1 --severity CRITICAL ${SIM_IMAGE}
         """
       }
     }
 
     stage('Publish Images') {
       steps {
-        withCredentials([usernamePassword(credentialsId: "${NEXUS_CRED}", usernameVariable: 'NEXU_USER', passwordVariable: 'NEXU_PASS')]) {
+        withCredentials([usernamePassword(
+          credentialsId: "${NEXUS_CRED}",
+          usernameVariable: 'NEXU_USER',
+          passwordVariable: 'NEXU_PASS'
+        )]) {
           sh """
-            if command -v docker >/dev/null 2>&1; then
-              echo "$NEXU_PASS" | docker login -u "$NEXU_USER" --password-stdin ${REGISTRY} || true
-              docker push ${BACKEND_IMAGE} || true
-              docker push ${SIM_IMAGE} || true
-            else
-              echo "docker not found on agent, skipping image push"
-            fi
+            echo ">> Logging into registry ${REGISTRY}"
+            echo "$NEXU_PASS" | docker login -u "$NEXU_USER" --password-stdin ${REGISTRY}
+
+            echo ">> Pushing backend image"
+            docker push ${BACKEND_IMAGE}
+
+            echo ">> Pushing simulator image"
+            docker push ${SIM_IMAGE}
           """
         }
       }
@@ -108,13 +121,16 @@ pipeline {
       steps {
         withCredentials([file(credentialsId: "${KUBECONFIG_CRED}", variable: 'KUBECONFIG_FILE')]) {
           sh """
-            if command -v kubectl >/dev/null 2>&1; then
-              kubectl --kubeconfig=$KUBECONFIG_FILE -n dev set image deployment/graphpass-backend graphpass-backend=${BACKEND_IMAGE} --record || true
-              kubectl --kubeconfig=$KUBECONFIG_FILE -n dev set image deployment/graphpass-sim graphpass-sim=${SIM_IMAGE} --record || true
-              kubectl --kubeconfig=$KUBECONFIG_FILE -n dev rollout status deployment/graphpass-backend || true
-            else
-              echo "kubectl not found on agent, skipping deploy"
-            fi
+            echo ">> Deploying to dev namespace with kubectl"
+
+            kubectl --kubeconfig=$KUBECONFIG_FILE -n dev set image deployment/graphpass-backend \
+              graphpass-backend=${BACKEND_IMAGE} --record
+
+            kubectl --kubeconfig=$KUBECONFIG_FILE -n dev set image deployment/graphpass-sim \
+              graphpass-sim=${SIM_IMAGE} --record
+
+            echo ">> Waiting for backend rollout to finish"
+            kubectl --kubeconfig=$KUBECONFIG_FILE -n dev rollout status deployment/graphpass-backend
           """
         }
       }
@@ -122,30 +138,35 @@ pipeline {
 
     stage('Integration Tests') {
       steps {
-        sh 'echo "run integration tests hitting dev cluster endpoints" || true'
+        sh '''
+          echo ">> Running integration tests against Dev cluster..."
+          # curl or pytest hitting your dev endpoints here
+        '''
       }
     }
   }
 
   post {
     always {
-      // Don't fail if no test XML yet
-      junit testResults: 'api/tests/**/results.xml', allowEmptyResults: true
+      echo "Build result: ${currentBuild.currentResult}"
 
-      // Don't fail if no JAR/SBOM yet
+      // Collect test reports (backend path)
+      junit testResults: 'api/test-results/**/*.xml', allowEmptyResults: true
+
+      // Optional: if you add reports for sim, adjust pattern
+      // junit testResults: 'simulator/test-results/**/*.xml', allowEmptyResults: true
+
       archiveArtifacts artifacts: '**/target/*.jar, **/*.sbom.json',
                        fingerprint: true,
                        allowEmptyArchive: true
     }
     failure {
-      // Your mail step was failing because there is no SMTP on localhost:25
-      // Keep this echo for now; uncomment mail after configuring SMTP.
-      echo "Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}. Configure SMTP and enable mail step if needed."
-
+      echo "Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+      // Uncomment after configuring SMTP in Jenkins:
       /*
       mail to: 'you@example.com',
            subject: "Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-           body: "See Jenkins."
+           body: "See Jenkins for details: ${env.BUILD_URL}"
       */
     }
   }
