@@ -1,5 +1,5 @@
 pipeline {
-  agent any
+  agent { label 'k8s-agent' }
 
   stages {
     stage('Debug Agent') {
